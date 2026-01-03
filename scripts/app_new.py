@@ -942,7 +942,7 @@ def phase3_rerank(
 # -------------------------
 
 st.set_page_config(page_title="NCBC LegalBot — Phase 1", layout="centered")
-st.title("⚖️ NCBC LegalBot — Phase 1 (Facts Extraction Only)")
+st.title("NCBC LegalBot — Phase 1 (Facts Extraction Only)")
 st.info("Phase 1 runs locally with regex only — no LLM calls.")
 st.caption("Extracts roles, actions, triggers, posture, and requested relief from a user scenario. No legal conclusions.")
 with st.expander("Tips for best results (what to include)", expanded=True):
