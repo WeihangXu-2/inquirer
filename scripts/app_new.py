@@ -1282,7 +1282,12 @@ if (auto and query.strip()) or (run and query.strip()):
                     st.write("**Statutes (excerpt only):** " + (", ".join(r.get("statutes_excerpt") or []) or "[]"))
                     st.write("**Statutes (full opinion scan):** " + (", ".join(r.get("statutes_fulltext") or []) or "[]"))
                     st.write(f"**Phase 2:** {r.get('phase2_method')} score={r.get('phase2_score'):.4f}")
-                    st.text_area("Evidence excerpt (what the LLM saw)", r.get("excerpt", ""), height=220)
+                    st.text_area(
+                        "Evidence excerpt (what the LLM saw)",
+                        r.get("excerpt", ""),
+                        height=220,
+                        key=f"phase3_excerpt_run_{r.get('doc_id', '')}_{i}",
+                    )
 
     # ✅ Always show Phase 3 results if present (survives Streamlit reruns)
     reranked_show = st.session_state.get("phase3_reranked", [])
@@ -1295,7 +1300,12 @@ if (auto and query.strip()) or (run and query.strip()):
                 st.write("**Statutes (excerpt only):** " + (", ".join(r.get("statutes_excerpt") or []) or "[]"))
                 st.write("**Statutes (full opinion scan):** " + (", ".join(r.get("statutes_fulltext") or []) or "[]"))
                 st.write(f"**Phase 2:** {r.get('phase2_method')} score={r.get('phase2_score'):.4f}")
-                st.text_area("Evidence excerpt (what the LLM saw)", r.get("excerpt", ""), height=220)
+                st.text_area(
+                    "Evidence excerpt (what the LLM saw)",
+                    r.get("excerpt", ""),
+                    height=220,
+                    key=f"phase3_excerpt_show_{r.get('doc_id', '')}_{i}",
+                )
 
     st.markdown("---")
     st.subheader("Phase 4 — Build Pro-User Arguments (LLM, evidence-only)")
