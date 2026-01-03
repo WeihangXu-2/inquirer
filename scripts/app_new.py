@@ -17,7 +17,7 @@ load_dotenv(ROOT_DIR / ".env")
 # --- LLM config (OpenAI-compatible endpoint, Duke LiteLLM by default) ---
 DUKE_LLM_BASE_URL = os.getenv("DUKE_LLM_BASE_URL", "https://litellm.oit.duke.edu/v1")
 DUKE_LLM_API_KEY  = os.getenv("DUKE_LLM_API_KEY", "")
-DUKE_LLM_MODEL    = os.getenv("DUKE_LLM_MODEL", "gpt-5-nano")
+DUKE_LLM_MODEL    = os.getenv("DUKE_LLM_MODEL", "gpt-4.1")
 
 REQUIRE_LLM_KEY = True
 if REQUIRE_LLM_KEY and not DUKE_LLM_API_KEY.strip():
