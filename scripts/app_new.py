@@ -1308,7 +1308,7 @@ if (auto and query.strip()) or (run and query.strip()):
                 )
 
     st.markdown("---")
-    st.subheader("Phase 4 — Build Pro-User Arguments (LLM, evidence-only)")
+    st.subheader("Phase 4 — Evidence-Based Legal Analysis (LLM, excerpt-only)")
 
     reranked_ss = st.session_state.get("phase3_reranked", [])
     if not reranked_ss:
@@ -1317,13 +1317,13 @@ if (auto and query.strip()) or (run and query.strip()):
         max_cases = st.slider("Max cases to use as support (cost control)", 3, 12, 8, step=1)
         max_chars = st.slider("Max total excerpt characters to send", 6000, 30000, 18000, step=1000)
 
-        if st.button("Run Phase 4 argument builder"):
+        if st.button("Run Phase 4"):
             if not base_url.strip():
                 st.error("Missing LLM base URL.")
             elif REQUIRE_LLM_KEY and not api_key.strip():
                 st.error("Missing LLM API key.")
             else:
-                with st.spinner("Phase 4: building arguments from evidence..."):
+                with st.spinner("Phase 4: synthesizing from evidence..."):
                     try:
                         memo = phase4_make_arguments(
                             reranked=reranked_ss,
@@ -1344,10 +1344,10 @@ if (auto and query.strip()) or (run and query.strip()):
         if memo:
             st.success("Phase 4 memo generated.")
 
-            st.subheader("Overall theory (evidence-grounded)")
+            st.subheader("Synthesis of relevant authority")
             st.write(memo.get("overall_theory_of_case", ""))
 
-            st.subheader("Best arguments in favor")
+            st.subheader("Findings supported by relevant precedent")
             for i, a in enumerate(memo.get("best_arguments", []) or [], 1):
                 with st.expander(f"{i}. {a.get('argument_title', '(untitled)')}", expanded=(i <= 3)):
                     st.write(a.get("argument", ""))
@@ -1366,7 +1366,7 @@ if (auto and query.strip()) or (run and query.strip()):
             st.subheader("Relevant statutes (excerpt-only)")
             st.write(", ".join(memo.get("statutes_relevant_excerpt_only", []) or []) or "[]")
 
-            st.subheader("Counterarguments and responses")
+            st.subheader("Competing interpretations and responses")
             for cr in memo.get("key_counterarguments_and_responses", []) or []:
                 st.write(f"- **Counter:** {cr.get('counterargument', '')}")
                 st.write(f"  **Response:** {cr.get('response', '')}")
