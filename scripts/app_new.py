@@ -14,23 +14,36 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[1]   # scripts/ -> project root
 load_dotenv(ROOT_DIR / ".env")
 
-# --- LLM config (OpenAI-compatible endpoint, Duke LiteLLM by default) ---
-DUKE_LLM_BASE_URL = os.getenv("DUKE_LLM_BASE_URL", "https://litellm.oit.duke.edu/v1")
-DUKE_LLM_API_KEY  = os.getenv("DUKE_LLM_API_KEY", "")
-DUKE_LLM_MODEL    = os.getenv("DUKE_LLM_MODEL", "gpt-4.1")
+# --- LLM config (Streamlit Secrets > env vars > defaults) ---
+DEFAULT_BASE_URL = "https://litellm.oit.duke.edu/v1"
+DEFAULT_MODEL = "gpt-4.1-nano"  # allowed by Duke LiteLLM
+
+DUKE_LLM_BASE_URL = st.secrets.get(
+    "DUKE_LLM_BASE_URL",
+    os.getenv("DUKE_LLM_BASE_URL", DEFAULT_BASE_URL),
+)
+DUKE_LLM_API_KEY = st.secrets.get(
+    "DUKE_LLM_API_KEY",
+    os.getenv("DUKE_LLM_API_KEY", ""),
+)
+DUKE_LLM_MODEL = st.secrets.get(
+    "DUKE_LLM_MODEL",
+    os.getenv("DUKE_LLM_MODEL", DEFAULT_MODEL),
+)
 
 REQUIRE_LLM_KEY = True
-if REQUIRE_LLM_KEY and not DUKE_LLM_API_KEY.strip():
-    st.error("Missing DUKE_LLM_API_KEY. Set it in .env (local) or Streamlit Secrets (cloud).")
+if REQUIRE_LLM_KEY and not str(DUKE_LLM_API_KEY).strip():
+    st.error("Missing DUKE_LLM_API_KEY in Streamlit Secrets or .env.")
     st.stop()
 
-# -------------------------
-# HARD-CODED LLM CONFIG (no user input)
-# -------------------------
-DUKE_LLM_BASE_URL = os.getenv("DUKE_LLM_BASE_URL", "https://litellm.oit.duke.edu/v1")
-DUKE_LLM_API_KEY  = os.getenv("DUKE_LLM_API_KEY", "")
-DUKE_LLM_MODEL    = os.getenv("DUKE_LLM_MODEL", "gpt-5-nano")
-REQUIRE_LLM_KEY = True
+ALLOWED_MODELS = {"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "Mistral on-site"}
+if DUKE_LLM_MODEL not in ALLOWED_MODELS:
+    st.error(
+        f"Model '{DUKE_LLM_MODEL}' is not allowed for your team. "
+        f"Set DUKE_LLM_MODEL to one of: {sorted(ALLOWED_MODELS)}"
+    )
+    st.stop()
+
 # -------------------------
 # Phase 1 Extractor (facts-only, no legal conclusions)
 # -------------------------
@@ -381,7 +394,7 @@ def bm25_idf(N: int, df_t: int) -> float:
     return math.log(1.0 + (N - df_t + 0.5) / (df_t + 0.5))
 
 def bm25_search(index: BM25Index, query: str, top_k: int = 100) -> List[Hit]:
-    q_tokens = add_ngrams(tokenize(query), 1, 3)
+    q_tokens = add_ngrams(tokenize(query), 1, 2)
     if not q_tokens or not index.docs:
         return []
 
