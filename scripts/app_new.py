@@ -17,6 +17,7 @@ load_dotenv(ROOT_DIR / ".env")
 # --- LLM config (Streamlit Secrets > env vars > defaults) ---
 DEFAULT_BASE_URL = "https://litellm.oit.duke.edu/v1"
 DEFAULT_MODEL = "GPT 4.1 Mini"  # allowed by Duke LiteLLM
+bronze_dir = "data/bronze/ncbc"
 
 DUKE_LLM_BASE_URL = st.secrets.get(
     "DUKE_LLM_BASE_URL",
@@ -982,18 +983,14 @@ if (auto and query.strip()) or (run and query.strip()):
     st.session_state["user_query"] = query
 
     st.subheader("Extracted facts (Phase 1)")
-    st.json(facts)
+    with st.expander("Show raw extracted JSON", expanded=False):
+        st.json(facts)
 
     # 🔹 Show the retrieval query that will be used in Phase 2
     retrieval_query = build_retrieval_query(facts)
 
     st.markdown("---")
     st.subheader("Phase 2 — High-Recall Retrieval (BM25 primary)")
-
-    bronze_dir = st.text_input(
-        "Bronze/raw folder (directory of .json opinions)",
-        value=st.session_state.get("bronze_dir", "data/bronze/ncbc")
-    )
 
     top_k = st.slider("How many candidate cases?", 50, 200, 150, step=10)
 
