@@ -361,7 +361,8 @@ def load_bronze_docs(bronze_dir: str, max_chars: int = 750_000) -> List[Doc]:
             doc_id=fn,
             text=txt,
             tokens=toks,
-            title=guess_case_title(txt,fn)
+            title=guess_case_title(txt, fn),
+            source_file=path,  # ✅ record where it came from
         ))
     return docs
 
@@ -399,6 +400,29 @@ def build_bm25_index(docs: List[Doc], k1: float = 1.5, b: float = 0.75) -> BM25I
 def bm25_idf(N: int, df_t: int) -> float:
     # standard BM25 with +0.5 smoothing
     return math.log(1.0 + (N - df_t + 0.5) / (df_t + 0.5))
+
+# -------- Snippet helper (must be defined before bm25_search) --------
+
+def make_snippet(text: str, query: str, window: int = 260) -> str:
+    """
+    Find first match of any strong query token and return a nearby snippet.
+    """
+    if not text:
+        return ""
+    q_tokens = uniq_keep_order(tokenize(query))[:12]  # a few anchors
+    best_pos: Optional[int] = None
+    lower = text.lower()
+    for t in q_tokens:
+        pos = lower.find(t.lower())
+        if pos != -1:
+            best_pos = pos
+            break
+    if best_pos is None:
+        # fallback: first chunk
+        return norm(text[:window]) + ("…" if len(text) > window else "")
+    start = max(0, best_pos - window // 2)
+    end = min(len(text), start + window)
+    return "…" + norm(text[start:end]) + ("…" if end < len(text) else "")
 
 def bm25_search(index: BM25Index, query: str, top_k: int = 100) -> List[Hit]:
     q_tokens = add_ngrams(tokenize(query), 1, 2)
@@ -532,27 +556,6 @@ def tfidf_search(docs: List[Doc], doc_vecs: List[Dict[str, float]], idf: Dict[st
 
 # -------- Snippet helper --------
 
-def make_snippet(text: str, query: str, window: int = 260) -> str:
-    """
-    Find first match of any strong query token and return a nearby snippet.
-    """
-    if not text:
-        return ""
-    q_tokens = uniq_keep_order(tokenize(query))[:12]  # a few anchors
-    best_pos: Optional[int] = None
-    lower = text.lower()
-    for t in q_tokens:
-        pos = lower.find(t.lower())
-        if pos != -1:
-            best_pos = pos
-            break
-    if best_pos is None:
-        # fallback: first chunk
-        return norm(text[:window]) + ("…" if len(text) > window else "")
-    start = max(0, best_pos - window // 2)
-    end = min(len(text), start + window)
-    return "…" + norm(text[start:end]) + ("…" if end < len(text) else "")
-
 # -------- Combined search --------
 
 def phase2_retrieve(bronze_dir: str, query: str, top_k: int = 150) -> List[Hit]:
@@ -591,8 +594,6 @@ def phase2_retrieve(bronze_dir: str, query: str, top_k: int = 150) -> List[Hit]:
 # Phase 3 — Structured Re-Ranking (LLM w/ evidence only)
 # From many candidates -> a few truly similar ones.
 # -------------------------
-
-import json
 import time
 import requests
 
@@ -937,6 +938,200 @@ def phase3_rerank(
     return results[:top_n]
 
 
+def build_phase4_evidence_pack(
+    reranked: List[Dict[str, Any]],
+    max_cases: int = 8,
+    max_total_chars: int = 18_000,
+) -> Dict[str, Any]:
+    """
+    Build a compact evidence pack for Phase 4 from Phase 3 outputs.
+    Evidence-only: include excerpts + excerpt-statutes + outcomes.
+    """
+    pack = []
+    total = 0
+
+    for r in reranked[:max_cases]:
+        excerpt = (r.get("excerpt") or "").strip()
+        if not excerpt:
+            continue
+
+        item = {
+            "doc_id": r.get("doc_id", ""),
+            "case_title": r.get("case_title", r.get("doc_id", "")),
+            "relevance_score": r.get("relevance_score", 0.0),
+            "outcome": r.get("outcome", "unknown"),
+            "phase2_method": r.get("phase2_method", ""),
+            "phase2_score": r.get("phase2_score", 0.0),
+            # Evidence
+            "statutes_excerpt": r.get("statutes_excerpt") or [],
+            "excerpt": excerpt,
+        }
+
+        item_chars = len(item["excerpt"])
+        if total + item_chars > max_total_chars:
+            break
+
+        pack.append(item)
+        total += item_chars
+
+    # Also provide a deduped statute list (excerpt-only, truthy)
+    statutes = []
+    for it in pack:
+        statutes += it.get("statutes_excerpt", [])
+    statutes = uniq_keep_order(statutes)
+
+    return {
+        "cases_used": pack,
+        "statutes_excerpt_deduped": statutes,
+        "limits": {
+            "max_cases": max_cases,
+            "max_total_chars": max_total_chars,
+            "used_cases": len(pack),
+            "used_chars": total,
+        }
+    }
+
+def llm_phase4_arguments(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    user_scenario: str,
+    phase1_facts: Dict[str, Any],
+    evidence_pack: Dict[str, Any],
+    timeout: int = 60,
+) -> Dict[str, Any]:
+    """
+    Produce pro-user arguments using ONLY evidence_pack excerpts.
+    """
+    system = (
+        "You are drafting the strongest arguments IN FAVOR of the user based ONLY on the provided evidence excerpts.\n"
+        "No outside knowledge. No assumptions. If something is not supported by the excerpts, say 'unknown' or omit.\n"
+        "Hard constraint: Statutes listed must appear in evidence_pack.statutes_excerpt_deduped.\n"
+        "Hard constraint: Every argument must cite at least one supporting case by doc_id and a short quote (<=25 words).\n"
+        "Return STRICT JSON only (no markdown)."
+    )
+
+    required_schema = {
+        "overall_theory_of_case": "string (2-5 sentences, evidence-grounded)",
+        "best_arguments": [
+            {
+                "argument_title": "string",
+                "argument": "string (tight, persuasive, grounded)",
+                "elements_or_prongs_if_any": "array of strings (or [])",
+                "support": [
+                    {
+                        "doc_id": "string",
+                        "case_title": "string",
+                        "supporting_quote": "string (<=25 words, verbatim from excerpt)",
+                        "why_supports": "string (one sentence)"
+                    }
+                ]
+            }
+        ],
+        "statutes_relevant_excerpt_only": "array of strings (subset of evidence_pack.statutes_excerpt_deduped)",
+        "key_counterarguments_and_responses": [
+            {
+                "counterargument": "string",
+                "response": "string (must cite at least one case in support)"
+            }
+        ],
+        "missing_info_to_strengthen": "array of strings",
+        "safety_note": "string (brief: not legal advice)"
+    }
+
+    user_obj = {
+        "task": "Phase 4 argument builder (pro-user), evidence-only.",
+        "user_scenario": user_scenario,
+        "phase1_facts": phase1_facts,
+        "evidence_pack": evidence_pack,
+        "required_output_json_schema": required_schema,
+        "instructions": [
+            "Use only evidence_pack.cases_used[*].excerpt.",
+            "Do NOT invent holdings, standards, or statutes.",
+            "Each argument must include >=1 support citation with doc_id and a short verbatim quote (<=25 words).",
+            "statutes_relevant_excerpt_only must be drawn ONLY from evidence_pack.statutes_excerpt_deduped.",
+            "If evidence is thin, say so and focus on what can be defended."
+        ],
+    }
+
+    payload = {
+        "model": model,
+        "temperature": 0.1,  # slight creativity but still controlled
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps(user_obj, ensure_ascii=False)},
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    u = base_url.rstrip("/")
+    url = u if u.endswith("/chat/completions") else (u + "/chat/completions")
+
+    r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise RuntimeError(f"Phase4 LLM HTTP {r.status_code} from {url}: {r.text[:800]}") from e
+
+    data = r.json()
+    content = data["choices"][0]["message"]["content"]
+    return json.loads(content)
+
+def phase4_make_arguments(
+    *,
+    reranked: List[Dict[str, Any]],
+    user_scenario: str,
+    phase1_facts: Dict[str, Any],
+    base_url: str,
+    api_key: str,
+    model: str,
+    max_cases: int = 8,
+    max_total_chars: int = 18_000,
+) -> Dict[str, Any]:
+    evidence_pack = build_phase4_evidence_pack(
+        reranked=reranked,
+        max_cases=max_cases,
+        max_total_chars=max_total_chars,
+    )
+
+    out = llm_phase4_arguments(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        user_scenario=user_scenario,
+        phase1_facts=phase1_facts,
+        evidence_pack=evidence_pack,
+    )
+
+    # HARD FILTER statutes to excerpt-only set
+    allowed = set(evidence_pack.get("statutes_excerpt_deduped", []))
+    s = out.get("statutes_relevant_excerpt_only", []) or []
+    s = [norm(x) for x in s if isinstance(x, str)]
+    out["statutes_relevant_excerpt_only"] = uniq_keep_order([x for x in s if x in allowed])
+
+    # Attach evidence pack for transparency/debug
+    out["_evidence_pack_meta"] = {
+        "limits": evidence_pack.get("limits", {}),
+        "cases_used": [
+            {
+                "doc_id": c.get("doc_id",""),
+                "case_title": c.get("case_title",""),
+                "outcome": c.get("outcome","unknown"),
+                "relevance_score": c.get("relevance_score", 0.0),
+                "statutes_excerpt": c.get("statutes_excerpt", []),
+            }
+            for c in evidence_pack.get("cases_used", [])
+        ],
+        "statutes_excerpt_deduped": evidence_pack.get("statutes_excerpt_deduped", []),
+    }
+
+    return out
+
 # -------------------------
 # Streamlit UI (Display only)
 # -------------------------
@@ -1077,6 +1272,7 @@ if (auto and query.strip()) or (run and query.strip()):
                     sleep_s=0.0,
                     _ui_progress=(prog, status),
                 )
+                st.session_state["phase3_reranked"] = reranked
             st.success(f"Phase 3 complete. Showing top {len(reranked)} reranked cases.")
 
             for i, r in enumerate(reranked, 1):
@@ -1087,6 +1283,91 @@ if (auto and query.strip()) or (run and query.strip()):
                     st.write("**Statutes (full opinion scan):** " + (", ".join(r.get("statutes_fulltext") or []) or "[]"))
                     st.write(f"**Phase 2:** {r.get('phase2_method')} score={r.get('phase2_score'):.4f}")
                     st.text_area("Evidence excerpt (what the LLM saw)", r.get("excerpt", ""), height=220)
+
+    # ✅ Always show Phase 3 results if present (survives Streamlit reruns)
+    reranked_show = st.session_state.get("phase3_reranked", [])
+    if reranked_show:
+        st.success(f"Phase 3 results available: {len(reranked_show)} cases.")
+        for i, r in enumerate(reranked_show, 1):
+            title = f"{i}. {r.get('case_title', r['doc_id'])} — relevance={r['relevance_score']:.2f} | outcome={r.get('outcome', 'unknown')}"
+            with st.expander(title, expanded=(i <= 5)):
+                st.write("**Why relevant:** " + (r.get("why_relevant") or ""))
+                st.write("**Statutes (excerpt only):** " + (", ".join(r.get("statutes_excerpt") or []) or "[]"))
+                st.write("**Statutes (full opinion scan):** " + (", ".join(r.get("statutes_fulltext") or []) or "[]"))
+                st.write(f"**Phase 2:** {r.get('phase2_method')} score={r.get('phase2_score'):.4f}")
+                st.text_area("Evidence excerpt (what the LLM saw)", r.get("excerpt", ""), height=220)
+
+    st.markdown("---")
+    st.subheader("Phase 4 — Build Pro-User Arguments (LLM, evidence-only)")
+
+    reranked_ss = st.session_state.get("phase3_reranked", [])
+    if not reranked_ss:
+        st.info("Run Phase 3 first (rerank) to generate the evidence set for Phase 4.")
+    else:
+        max_cases = st.slider("Max cases to use as support (cost control)", 3, 12, 8, step=1)
+        max_chars = st.slider("Max total excerpt characters to send", 6000, 30000, 18000, step=1000)
+
+        if st.button("Run Phase 4 argument builder"):
+            if not base_url.strip():
+                st.error("Missing LLM base URL.")
+            elif REQUIRE_LLM_KEY and not api_key.strip():
+                st.error("Missing LLM API key.")
+            else:
+                with st.spinner("Phase 4: building arguments from evidence..."):
+                    try:
+                        memo = phase4_make_arguments(
+                            reranked=reranked_ss,
+                            user_scenario=st.session_state.get("user_query", query),
+                            phase1_facts=st.session_state.get("phase1_facts", facts),
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            max_cases=max_cases,
+                            max_total_chars=max_chars,
+                        )
+                        st.session_state["phase4_memo"] = memo
+                    except Exception as e:
+                        st.error(f"Phase 4 failed: {type(e).__name__}: {str(e)[:400]}")
+                        st.stop()
+
+        memo = st.session_state.get("phase4_memo")
+        if memo:
+            st.success("Phase 4 memo generated.")
+
+            st.subheader("Overall theory (evidence-grounded)")
+            st.write(memo.get("overall_theory_of_case", ""))
+
+            st.subheader("Best arguments in favor")
+            for i, a in enumerate(memo.get("best_arguments", []) or [], 1):
+                with st.expander(f"{i}. {a.get('argument_title', '(untitled)')}", expanded=(i <= 3)):
+                    st.write(a.get("argument", ""))
+                    prongs = a.get("elements_or_prongs_if_any", []) or []
+                    if prongs:
+                        st.write("**Elements / prongs (if any):**")
+                        for p in prongs:
+                            st.write(f"- {p}")
+
+                    st.write("**Support (evidence quotes):**")
+                    for s in a.get("support", []) or []:
+                        st.write(f"- **{s.get('case_title', '')}** ({s.get('doc_id', '')})")
+                        st.write(f"  > {s.get('supporting_quote', '')}")
+                        st.write(f"  {s.get('why_supports', '')}")
+
+            st.subheader("Relevant statutes (excerpt-only)")
+            st.write(", ".join(memo.get("statutes_relevant_excerpt_only", []) or []) or "[]")
+
+            st.subheader("Counterarguments and responses")
+            for cr in memo.get("key_counterarguments_and_responses", []) or []:
+                st.write(f"- **Counter:** {cr.get('counterargument', '')}")
+                st.write(f"  **Response:** {cr.get('response', '')}")
+
+            st.subheader("Missing info to strengthen")
+            for mi in memo.get("missing_info_to_strengthen", []) or []:
+                st.write(f"- {mi}")
+
+            with st.expander("Debug: Evidence pack meta", expanded=False):
+                st.json(memo.get("_evidence_pack_meta", {}))
+
 st.markdown("---")
 st.caption("Tip: Add who did what to whom, what was refused, and what relief you want (inspection, injunction, damages).")
 
