@@ -36,7 +36,13 @@ if REQUIRE_LLM_KEY and not str(DUKE_LLM_API_KEY).strip():
     st.error("Missing DUKE_LLM_API_KEY in Streamlit Secrets or .env.")
     st.stop()
 
-ALLOWED_MODELS = {"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "Mistral on-site"}
+ALLOWED_MODELS = {
+    "GPT 4.1",
+    "GPT 4.1 Mini",
+    "GPT 4.1 Nano",
+    "Mistral on-site",
+}
+
 if DUKE_LLM_MODEL not in ALLOWED_MODELS:
     st.error(
         f"Model '{DUKE_LLM_MODEL}' is not allowed for your team. "
