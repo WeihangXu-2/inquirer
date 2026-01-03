@@ -1273,21 +1273,7 @@ if (auto and query.strip()) or (run and query.strip()):
                     _ui_progress=(prog, status),
                 )
                 st.session_state["phase3_reranked"] = reranked
-            st.success(f"Phase 3 complete. Showing top {len(reranked)} reranked cases.")
-
-            for i, r in enumerate(reranked, 1):
-                title = f"{i}. {r.get('case_title', r['doc_id'])} — relevance={r['relevance_score']:.2f} | outcome={r.get('outcome', 'unknown')}"
-                with st.expander(title, expanded=(i <= 5)):
-                    st.write("**Why relevant:** " + (r.get("why_relevant") or ""))
-                    st.write("**Statutes (excerpt only):** " + (", ".join(r.get("statutes_excerpt") or []) or "[]"))
-                    st.write("**Statutes (full opinion scan):** " + (", ".join(r.get("statutes_fulltext") or []) or "[]"))
-                    st.write(f"**Phase 2:** {r.get('phase2_method')} score={r.get('phase2_score'):.4f}")
-                    st.text_area(
-                        "Evidence excerpt (what the LLM saw)",
-                        r.get("excerpt", ""),
-                        height=220,
-                        key=f"phase3_excerpt_run_{r.get('doc_id', '')}_{i}",
-                    )
+            st.success("Phase 3 complete. Results are shown below.")
 
     # ✅ Always show Phase 3 results if present (survives Streamlit reruns)
     reranked_show = st.session_state.get("phase3_reranked", [])
