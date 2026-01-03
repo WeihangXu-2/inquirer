@@ -16,7 +16,7 @@ load_dotenv(ROOT_DIR / ".env")
 
 # --- LLM config (Streamlit Secrets > env vars > defaults) ---
 DEFAULT_BASE_URL = "https://litellm.oit.duke.edu/v1"
-DEFAULT_MODEL = "gpt-4.1-nano"  # allowed by Duke LiteLLM
+DEFAULT_MODEL = "gpt-4.1-mini"  # allowed by Duke LiteLLM
 
 DUKE_LLM_BASE_URL = st.secrets.get(
     "DUKE_LLM_BASE_URL",
