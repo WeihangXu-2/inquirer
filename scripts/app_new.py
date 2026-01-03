@@ -336,7 +336,7 @@ def load_bronze_docs(bronze_dir: str, max_chars: int = 750_000) -> List[Doc]:
             continue
 
         txt = txt[:max_chars]
-        toks = add_ngrams(tokenize(txt), 1, 3)
+        toks = add_ngrams(tokenize(txt), 1, 2)  # 1–2 grams (massively smaller)
         docs.append(Doc(
             doc_id=fn,
             text=txt,
@@ -452,6 +452,24 @@ def build_tfidf(docs: List[Doc]) -> Tuple[List[Dict[str, float]], Dict[str, floa
         doc_vecs.append(vec)
 
     return doc_vecs, idf
+@st.cache_resource(show_spinner=False)
+def get_phase2_assets(bronze_dir: str):
+    """
+    Load bronze docs once and build retrieval artifacts once per Streamlit process.
+    Returns:
+      docs_by_id: doc_id -> Doc (contains text + tokens)
+      bm25_idx: BM25Index
+      tfidf_pack: (doc_vecs, idf)
+    """
+    docs = load_bronze_docs(bronze_dir)
+    docs_by_id = {d.doc_id: d for d in docs}
+
+    bm25_idx = build_bm25_index(docs)
+
+    doc_vecs, idf = build_tfidf(docs)
+    tfidf_pack = (doc_vecs, idf)
+
+    return docs_by_id, bm25_idx, tfidf_pack
 
 def tfidf_query_vec(query: str, idf: Dict[str, float]) -> Dict[str, float]:
     qt = add_ngrams(tokenize(query), 1, 3)
@@ -519,25 +537,23 @@ def make_snippet(text: str, query: str, window: int = 260) -> str:
 
 def phase2_retrieve(bronze_dir: str, query: str, top_k: int = 150) -> List[Hit]:
     """
-    High-recall strategy:
+    High-recall strategy (cached):
       1) BM25 primary
-      2) If BM25 yields too few, use TF-IDF fallback
-      3) Return up to top_k (typically 50–200)
+      2) If BM25 yields too few, TF-IDF fallback
     """
-    docs = load_bronze_docs(bronze_dir)
-    if not docs or not query.strip():
+    if not query.strip():
         return []
 
+    docs_by_id, bm25_idx, (doc_vecs, idf) = get_phase2_assets(bronze_dir)
+    docs = bm25_idx.docs  # same docs list used to build bm25
+
     # BM25
-    bm25_idx = build_bm25_index(docs)
     bm25_hits = bm25_search(bm25_idx, query, top_k=top_k)
 
-    # If BM25 returns enough, keep it (high recall usually fine)
     if len(bm25_hits) >= min(50, top_k):
         return bm25_hits
 
     # TF-IDF backup
-    doc_vecs, idf = build_tfidf(docs)
     tfidf_hits = tfidf_search(docs, doc_vecs, idf, query, top_k=top_k)
 
     # Merge (prefer BM25 order; fill from TF-IDF)
@@ -975,8 +991,7 @@ if (auto and query.strip()) or (run and query.strip()):
     else:
         st.success(f"Retrieved {len(hits)} candidates (high recall). No statute filtering applied.")
         # Build a quick title map so we can show "X v. Y" instead of the JSON filename
-        docs_for_titles = load_bronze_docs(bronze_dir)
-        docs_by_id_titles = {d.doc_id: d for d in docs_for_titles}
+        docs_by_id_titles, _, _ = get_phase2_assets(bronze_dir)
 
         for i, h in enumerate(hits[:3], 1):
             d0 = docs_by_id_titles.get(h.doc_id)
@@ -1006,10 +1021,7 @@ if (auto and query.strip()) or (run and query.strip()):
     # Build doc map for fast lookup (Doc objects from loader)
     # If you already have docs list from Phase 2, reuse it.
     # Otherwise reload once:
-    docs = load_bronze_docs(st.session_state.get("bronze_dir", bronze_dir))  # uses your JSON loader now
-    # uses your JSON loader now
-    docs_by_id = {d.doc_id: d for d in docs}
-
+    docs_by_id, _, _ = get_phase2_assets(st.session_state.get("bronze_dir", bronze_dir))
     # LLM config (OpenAI-compatible endpoint)
     st.caption("LLM sees ONLY the excerpt per candidate. No outside knowledge allowed.")
 
