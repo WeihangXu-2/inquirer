@@ -10,6 +10,34 @@ from typing import Dict, List, Any, Tuple, Optional
 import streamlit as st
 from dotenv import load_dotenv
 
+# -------------------------
+# Folder context from Flask (folder_id in URL)
+# -------------------------
+
+# Works on newer Streamlit. If your Streamlit is older, I'll give the fallback below.
+qp = st.experimental_get_query_params()
+folder_id_raw = None
+
+try:
+    # Newer Streamlit
+    qp = st.query_params
+    folder_id_raw = qp.get("folder_id")
+    if isinstance(folder_id_raw, list):
+        folder_id_raw = folder_id_raw[0] if folder_id_raw else None
+except Exception:
+    # Older Streamlit fallback
+    qp = st.experimental_get_query_params()
+    folder_id_raw = (qp.get("folder_id") or [None])[0]
+
+if folder_id_raw and "folder_id" not in st.session_state:
+    try:
+        st.session_state["folder_id"] = int(folder_id_raw)
+    except Exception:
+        st.session_state["folder_id"] = None
+
+FOLDER_ID = st.session_state.get("folder_id")
+
+
 # --- Load .env from project root reliably (works no matter where you run from) ---
 ROOT_DIR = Path(__file__).resolve().parents[1]   # scripts/ -> project root
 load_dotenv(ROOT_DIR / ".env")
@@ -31,6 +59,15 @@ DUKE_LLM_MODEL = st.secrets.get(
     "DUKE_LLM_MODEL",
     os.getenv("DUKE_LLM_MODEL", DEFAULT_MODEL),
 )
+
+FLASK_BASE_URL = st.secrets.get(
+    "FLASK_BASE_URL",
+    os.getenv("FLASK_BASE_URL", "").rstrip("/"),
+)
+
+if not FLASK_BASE_URL:
+    st.warning("FLASK_BASE_URL not set. Save-to-folder buttons will be disabled.")
+
 
 REQUIRE_LLM_KEY = True
 if REQUIRE_LLM_KEY and not str(DUKE_LLM_API_KEY).strip():
@@ -1132,6 +1169,65 @@ def phase4_make_arguments(
 
     return out
 
+def compact_phase3_for_save(reranked: List[Dict[str, Any]], max_cases: int = 8) -> Dict[str, Any]:
+    """
+    Store a short, reopenable snapshot (no giant excerpts).
+    """
+    out = []
+    for r in (reranked or [])[:max_cases]:
+        out.append({
+            "doc_id": r.get("doc_id", ""),
+            "case_title": r.get("case_title", ""),
+            "relevance_score": float(r.get("relevance_score", 0.0) or 0.0),
+            "outcome": r.get("outcome", "unknown"),
+            "statutes_excerpt": (r.get("statutes_excerpt") or [])[:12],
+            # keep snippet short
+            "why_relevant": (r.get("why_relevant") or "")[:280],
+        })
+    return {"top_cases": out}
+
+def compact_phase4_for_save(memo: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Store a short memo version: headings + top arguments with short quotes.
+    """
+    memo = memo or {}
+    best_args = []
+    for a in (memo.get("best_arguments") or [])[:6]:
+        support = []
+        for s in (a.get("support") or [])[:3]:
+            support.append({
+                "doc_id": s.get("doc_id", ""),
+                "case_title": s.get("case_title", ""),
+                "supporting_quote": (s.get("supporting_quote") or "")[:160],
+            })
+        best_args.append({
+            "argument_title": (a.get("argument_title") or "")[:140],
+            "argument": (a.get("argument") or "")[:650],
+            "support": support,
+        })
+
+    return {
+        "overall_theory_of_case": (memo.get("overall_theory_of_case") or "")[:900],
+        "best_arguments": best_args,
+        "statutes_relevant_excerpt_only": (memo.get("statutes_relevant_excerpt_only") or [])[:25],
+        "missing_info_to_strengthen": (memo.get("missing_info_to_strengthen") or [])[:20],
+    }
+
+def post_save_to_flask(folder_id: int, item_type: str, title: str, payload: Dict[str, Any]) -> Tuple[bool, str]:
+    if not FLASK_BASE_URL:
+        return False, "FLASK_BASE_URL not configured"
+    try:
+        r = requests.post(
+            f"{FLASK_BASE_URL}/folders/{folder_id}/save",
+            json={"item_type": item_type, "title": title, "payload": payload},
+            timeout=8,
+        )
+        if r.ok and (r.json() or {}).get("ok"):
+            return True, "Saved"
+        return False, f"Save failed: HTTP {r.status_code}"
+    except Exception as e:
+        return False, f"Save error: {type(e).__name__}: {str(e)[:180]}"
+
 # -------------------------
 # Streamlit UI (Display only)
 # -------------------------
@@ -1279,6 +1375,21 @@ if (auto and query.strip()) or (run and query.strip()):
     reranked_show = st.session_state.get("phase3_reranked", [])
     if reranked_show:
         st.success(f"Phase 3 results available: {len(reranked_show)} cases.")
+
+        # ---- SAVE BUTTON (Phase 3) ----
+        if FOLDER_ID and FLASK_BASE_URL:
+            if st.button("💾 Save Phase 3 results to folder"):
+                compact = compact_phase3_for_save(reranked_show, max_cases=8)
+                title = f"Phase 3 results ({len(reranked_show)} cases)"
+                ok, msg = post_save_to_flask(FOLDER_ID, "phase3", title, compact)
+                if ok:
+                    st.success("Saved Phase 3 snapshot to your folder.")
+                else:
+                    st.error(msg)
+        elif not FOLDER_ID:
+            st.info("Open this app from a folder page to enable saving.")
+        else:
+            st.info("Saving disabled: FLASK_BASE_URL not configured.")
         for i, r in enumerate(reranked_show, 1):
             title = f"{i}. {r.get('case_title', r['doc_id'])} — relevance={r['relevance_score']:.2f} | outcome={r.get('outcome', 'unknown')}"
             with st.expander(title, expanded=(i <= 5)):
@@ -1329,6 +1440,21 @@ if (auto and query.strip()) or (run and query.strip()):
         memo = st.session_state.get("phase4_memo")
         if memo:
             st.success("Phase 4 memo generated.")
+
+            # ---- SAVE BUTTON (Phase 4) ----
+            if FOLDER_ID and FLASK_BASE_URL:
+                if st.button("💾 Save Phase 4 memo to folder"):
+                    compact = compact_phase4_for_save(memo)
+                    title = "Phase 4 memo (evidence-based analysis)"
+                    ok, msg = post_save_to_flask(FOLDER_ID, "phase4", title, compact)
+                    if ok:
+                        st.success("Saved Phase 4 memo to your folder.")
+                    else:
+                        st.error(msg)
+            elif not FOLDER_ID:
+                st.info("Open this app from a folder page to enable saving.")
+            else:
+                st.info("Saving disabled: FLASK_BASE_URL not configured.")
 
             st.subheader("Synthesis of relevant authority")
             st.write(memo.get("overall_theory_of_case", ""))
