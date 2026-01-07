@@ -14,20 +14,15 @@ from dotenv import load_dotenv
 # Folder context from Flask (folder_id in URL)
 # -------------------------
 
-# Works on newer Streamlit. If your Streamlit is older, I'll give the fallback below.
-qp = st.experimental_get_query_params()
-folder_id_raw = None
-
+# -------------------------
+# Folder context from Flask (folder_id in URL) — Streamlit new API
+# -------------------------
 try:
-    # Newer Streamlit
-    qp = st.query_params
-    folder_id_raw = qp.get("folder_id")
-    if isinstance(folder_id_raw, list):
-        folder_id_raw = folder_id_raw[0] if folder_id_raw else None
+    qp = st.query_params  # Mapping-like
+    folder_id_raw = qp.get("folder_id", None)
 except Exception:
-    # Older Streamlit fallback
-    qp = st.experimental_get_query_params()
-    folder_id_raw = (qp.get("folder_id") or [None])[0]
+    # Very old Streamlit fallback (shouldn't happen on Streamlit Cloud)
+    folder_id_raw = None
 
 if folder_id_raw and "folder_id" not in st.session_state:
     try:
